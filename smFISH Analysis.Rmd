@@ -1,0 +1,109 @@
+---
+title: "smFISH Analysis"
+author: "Miguel Montez"
+date: "2023-01-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Add packages
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggtext)
+```
+
+# Import datasets from PartSeg output
+
+PartSeg saves a .xlxs file with two sheets of data.
+
+smFISH_dataset_1 and smFISH_dataset_2 from sheets 1 and 2 respectively are labeled as shown in the datasets_labeling_Fig.
+
+```{r}
+smFISH_dataset_1 <- read.delim2("~/R/smFISH/smFISH_dataset_1")
+smFISH_dataset_2 <- read.delim2("~/R/smFISH/smFISH_dataset_2")
+```
+
+# Analysis of cytoplasmic mRNA foci number per cell
+```{r message=FALSE, warning=FALSE}
+# Filter the dataset for cytoplasmic foci and compute the foci number per cell
+smFISH_dataset_2_cyt <- smFISH_dataset_2 %>% filter(compartment %in% c("Cytoplasm")) %>% group_by(treatment, embryo, name, compartment) %>% summarise(foci_number_per_cell=n())
+
+# Note that smFISH_dataset_2 from PartSeg output file sheet 2 contains information about cells with detected foci. The number of cells without any cytoplasmic foci can be obtained from (total number of cells) - (total number of cells with any cytoplasmic foci).
+```
+
+## Plot the foci number per cell
+```{r message=FALSE, warning=FALSE}
+foci_number_per_cell_plot <- ggplot(smFISH_dataset_2_cyt, aes(treatment, foci_number_per_cell, color=treatment, fill=treatment)) + geom_jitter(alpha=0.3, shape=18, size=0.8, position=position_jitterdodge()) + geom_boxplot(alpha=0.2, width=0.5, outlier.size=0.5, notch=TRUE) + labs(x=NULL, y="Cytoplasmic foci number per cell") + theme(panel.background=element_rect(fill="white"), axis.line.y.left=element_line(color="dark gray", size=0.5), axis.line.x.bottom=element_line(color="dark gray", size=0.5), axis.text.x=element_text(size=7, color="black"), axis.text.y=element_text(size=6, color="black"), axis.title.y=element_text(size=7))
+
+foci_number_per_cell_plot
+```
+
+# Analysis of active transcription
+
+## Filter nuclear foci
+```{r message=FALSE, warning=FALSE}
+smFISH_dataset_2_nuclear_foci <- smFISH_dataset_2 %>% select(treatment, embryo, name, compartment, brightness_sum) %>% filter(compartment %in% c("Nucleus", "Mixed"))
+
+# The annotation "Nucleus" in compartment labels foci found in the nucleoplasm while "Mixed" labels foci detected at the nuclear periphery.
+```
+
+## Compute the average brightness of nuclear foci
+```{r message=FALSE, warning=FALSE}
+# Since up to two foci per cell may correspond to transcription sites (TS) in diploid cells, we discard the two brightest foci per cell. From the remaining foci, we compute the average fluorescence intensity as a proxy for the intensity of a single mRNA transcript. To do this, for each cell arrange the foci by brightness in descending order, then remove the first two rows. Then, compute the average brightness.
+
+Avg_brightness_nucleus <- smFISH_dataset_2_nuclear_foci %>% group_by(name) %>% arrange(desc(brightness_sum), .by_group=TRUE) %>% slice(-(1:2)) %>% summarise(avg_brightness_nuc=mean(brightness_sum))
+```
+
+## For all nuclear foci (including the two brightest foci), we compute the fold-change intensity to the computed average.
+```{r message=FALSE, warning=FALSE}
+brightness_nucleus <- merge(smFISH_dataset_2_nuclear_foci, Avg_brightness_nucleus, all.x=TRUE)
+
+brightness_nucleus_FC <- brightness_nucleus %>% mutate(fold_change_brightness=brightness_sum/avg_brightness_nuc)
+```
+
+## Transcription sites
+
+Foci in which the fold-change was higher than or equal to 1.6 times the average were considered to be transcription sites (TS). This threshold may vary between experiments and can be adjusted based on the observations that the majority of the cells would not have more than 2 TS (diploid cells). For cells with more than 2 foci with fold-change above the threshold, we considered the 2 brightest foci to be the 2 active TS. We used a cutoff of 1.6 for most experiments but for the NaCl vs mock data we increased the cutoff to 1.8 to get more robust results.
+
+```{r message=FALSE, warning=FALSE}
+# Filter foci which brightness fold-change is >= 1.6.
+transcription_sites <- brightness_nucleus_FC %>% filter(fold_change_brightness >= "1.6")
+
+# Filter the 2 brightest foci
+transcription_sites_2n <- transcription_sites %>% group_by(name) %>% arrange(desc(fold_change_brightness), .by_group=TRUE) %>% slice(1:2)
+
+# Compute the average fluorescence intensity of TS for each group
+transcription_sites_mean_brightness <- transcription_sites_2n %>% group_by(treatment) %>% summarise(TS_mean_brightness=mean(fold_change_brightness), sd=sd(fold_change_brightness), n=n(), se=sd/sqrt(n))
+
+# Compute the number of TS in each embryo
+transcription_sites_2n_number <- transcription_sites_2n %>% group_by(treatment, embryo) %>% summarise(n_TS=n())
+```
+
+## Analysis of % of alleles with active transcription
+```{r message=FALSE, warning=FALSE}
+# Divide the number of identified TS by the total number of alleles (2 times the total number of cells)
+smFISH_dataset_2_total_n_cells <- smFISH_dataset_2 %>% group_by(treatment, embryo, name) %>% summarise(n()) %>% group_by(treatment, embryo) %>%  summarise(total_n_cells=n()) %>% mutate(total_n_alleles=total_n_cells*2)
+
+transcription_sites_2n_percent <- merge(transcription_sites_2n_number, smFISH_dataset_2_total_n_cells, by=c("treatment", "embryo")) %>% group_by(treatment, embryo) %>% mutate(percent=(n_TS/total_n_alleles)*100)
+
+transcription_sites_2n_percent_mean <- transcription_sites_2n_percent %>% group_by(treatment) %>% summarise(mean_percent=mean(percent), sd=sd(percent), n=n(), se=sd/sqrt(n))
+```
+
+## Plot the % of alleles with active transcription
+```{r message=FALSE, warning=FALSE}
+active_transcription_freq_plot <- ggplot(transcription_sites_2n_percent_mean, aes(treatment, mean_percent, color=treatment)) + geom_point(size=1.2) + geom_errorbar(aes(ymin=mean_percent-sd, ymax=mean_percent+sd), width=0.3, size=0.3) + geom_jitter(aes(y=percent), shape=18, size=0.8, position=position_jitterdodge(jitter.width=0.6, dodge.width=0.3), data=transcription_sites_2n_percent) + labs(x=NULL, y="Alleles with active transcription (%)") + theme(panel.background=element_rect(fill="white"), axis.line.y.left=element_line(color="dark gray", size=0.5), axis.line.x.bottom=element_line(color="dark gray", size=0.5), axis.text.x=element_text(size=7, color="black"), axis.text.y=element_text(size=6, color="black"), axis.title.y=element_text(size=7))
+
+active_transcription_freq_plot
+``` 
+
+## Plot the distribution of intensities of transcription sites (TS)
+```{r message=FALSE, warning=FALSE}
+TS_intensities_plot <- ggplot(transcription_sites_2n, aes(x=fold_change_brightness, group=treatment)) + geom_histogram(aes(y=..ncount.., color=treatment, fill=treatment), position="identity", alpha=0.3, bins=15) + labs(x="Normalized intensity of *foci* <br> corresponding to transcription sites", y="Normalized *foci* number") + geom_vline(data=transcription_sites_mean_brightness, aes(xintercept=TS_mean_brightness, color=treatment), linetype="dashed", size=0.3) + theme(panel.background=element_rect(fill="white"), axis.line.y.left=element_line(color="dark gray", size=0.5), axis.line.x.bottom=element_line(color="dark gray", size=0.5), axis.text=element_text(size=6, color="black"), axis.title.y=element_markdown(size=7, color="black"), axis.title.x=element_markdown(size=7, color="black"), legend.text=element_text(size=6), legend.title=element_blank(), legend.key.size=unit(0.4, "cm"), legend.key=element_rect(fill="white"), legend.position=c(0.75, 0.6))
+
+TS_intensities_plot
+```
+
